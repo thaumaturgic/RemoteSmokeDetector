@@ -1,2 +1,9 @@
 # RemoteSmokeDetector
-My neighbor below me smokes. Alot. I want to have a sensor on my balcony that detects when he lights up so I can close my balcony door and keep the smoke out of my apartment.
+My neighbor below me smokes. Alot. By the time I smell it, its too late and my apartment stinks of smoke. I want to have a sensor on my balcony that detects when he lights up so I can close my balcony door and keep the smoke out of my apartment.
+
+I had a few goals in mind when starting on this project:
+-Learn what the Arduino platform was capable of. I've heard about Arduino for years but never taken a look at it. I've been amazed at how easy they make it to build useful gadgets quickly with minimal hardware and firmware knowledge.
+-Get more familiar with bluetooth and other wireless technologies. All of the hardware components I used are 'off the shelf' modules from sparkfun and adafruit. Part of my goal was to understand what offerings these companies have available. I purchased BLE UARTs and evaluation boards for both the ESP32 and ESP8266. Again, im amazed at how easy all of these products are to use and how large of a community there is behind them.
+-Learn more about powering embedded systems with batteries and techniques to measure, manage and reduce current usage. Everything is wireless and battery powered these days. I want to know more about how they work.
+-Learn how to use Git and Github to manage my projects better. There isnt much code to commit but I figured this would be good practice with trying out different Git clients and the Git workflow. Most of my professional experience is with SVN and its time for me to get better at using Git.
+-Last but not least, to actually build something useful that would keep my neighbor below me from filling my apartment with smoke. With how easy it is to build devices from 'off the shelf' hardware and program them with Arduino, it seems the limiting factor for any project is your creativity. Learning about all of this stuff has really made me re-evaluate the embedded work and think about things differently.
