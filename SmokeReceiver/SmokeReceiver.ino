@@ -20,10 +20,18 @@
 int bluetoothTx = 13;  // TX-O pin of bluetooth mate
 int bluetoothRx = 12;  // RX-I pin of bluetooth mate
 
+int redLedPin = 9;
+int yellowLedPin = 8;
+int greenLedPin = 7;
+
 SoftwareSerial bluetooth(bluetoothTx, bluetoothRx); // Serial Connection to the bluetooth modem
 
 void setup()
 {
+  pinMode(redLedPin, OUTPUT);
+  pinMode(yellowLedPin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
+
   delay(1000);
 
   Serial.begin(9600);  // Begin the serial monitor at 9600bps
@@ -37,33 +45,58 @@ void setup()
   delay(100);
 }
 
+String receivedMessage = "";
+
 void loop()
 {
-  while (bluetooth.available()) // If the bluetooth sent any characters
-  { 
-    // Send any characters the bluetooth prints to the serial monitor
-    Serial.print((char)bluetooth.read());
+  if (bluetooth.available()) // If the bluetooth sent any characters
+  {
+    char receivedChar = bluetooth.read();
+    receivedMessage += receivedChar;
+
+    if (receivedChar == ' ')
+    {
+      // TODO: Process received measurement;
+      float receivedMeasurement = receivedMessage.toFloat();
+
+      Serial.println(receivedMeasurement);
+
+      UpdateLEDs(receivedMeasurement);
+
+      // Reset the string we are building
+      receivedMessage = "";
+    }
   }
-  while (Serial.available()) // If stuff was typed in the serial monitor
+  if (Serial.available()) // If stuff was typed in the serial monitor
   {
     // Send any characters the Serial monitor prints to the bluetooth
     bluetooth.print((char)Serial.read());
   }
+}
 
-  //////////////////////////////////////////////////////////////////////////////////
+void UpdateLEDs(float voltageMeasurement)
+{
+  // Start from a clean state. Turn everything off
+  digitalWrite(greenLedPin, LOW);
+  digitalWrite(redLedPin, LOW);
+  digitalWrite(yellowLedPin, LOW);
 
-
-  String test = "1.5";
-  Serial.println(test);
-  float convertedString = test.toFloat();
-  Serial.println(convertedString);
-
-  if(convertedString > 1)
+  if (voltageMeasurement > 4.0) // Set Red LED and buzzer
   {
-    Serial.println("Greater than 1");
+    digitalWrite(redLedPin, HIGH);
+    // TODO: buzzer?
   }
-
-  
- 
+  else if (voltageMeasurement > 3.0) // Set Red LED
+  {
+    digitalWrite(redLedPin, HIGH);
+  }
+  else if (voltageMeasurement > 2.0) // Set Yellow LED
+  {
+    digitalWrite(yellowLedPin, HIGH);
+  }
+  else // Set Green LED
+  {
+    digitalWrite(greenLedPin, HIGH);
+  }
 }
 

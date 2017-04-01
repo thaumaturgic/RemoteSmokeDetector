@@ -24,7 +24,7 @@ SoftwareSerial bluetooth(bluetoothTx, bluetoothRx); // Serial Connection to the 
 
 void setup()
 {
-  delay(3000);
+  delay(1000);
 
   Serial.begin(9600);  // Begin the serial monitor at 9600bps
 
@@ -73,7 +73,7 @@ void loop()
   Serial.print(" ");
   Serial.print(sensorVoltage);
   Serial.println();
-  delay(500);
+  delay(200);
 
   bluetooth.print(sensorVoltage);
   bluetooth.print(" ");
