@@ -17,9 +17,11 @@
 */
 #include <SoftwareSerial.h>
 
+// Pins used for software serial
 int bluetoothTx = 13;  // TX-O pin of bluetooth mate
 int bluetoothRx = 12;  // RX-I pin of bluetooth mate
 
+// Pins used for the LEDs
 int redLedPin = 9;
 int yellowLedPin = 8;
 int greenLedPin = 7;
@@ -32,8 +34,7 @@ void setup()
   pinMode(yellowLedPin, OUTPUT);
   pinMode(greenLedPin, OUTPUT);
 
-  delay(1000);
-
+  delay(500);
   Serial.begin(9600);  // Begin the serial monitor at 9600bps
 
   bluetooth.begin(115200);  // The Bluetooth Mate defaults to 115200bps
@@ -45,27 +46,14 @@ void setup()
   delay(100);
 }
 
-String receivedMessage = "";
-
 void loop()
 {
+  // TODO: If we havent gotten any measurements from the sensor for a 5 minutes, then set a warning that we have lost connection. Maybe flash all the LEDs?
   if (bluetooth.available()) // If the bluetooth sent any characters
   {
-    char receivedChar = bluetooth.read();
-    receivedMessage += receivedChar;
-
-    if (receivedChar == ' ')
-    {
-      // TODO: Process received measurement;
-      float receivedMeasurement = receivedMessage.toFloat();
-
-      Serial.println(receivedMeasurement);
-
-      UpdateLEDs(receivedMeasurement);
-
-      // Reset the string we are building
-      receivedMessage = "";
-    }
+    float receivedMeasurement = bluetooth.readStringUntil(' ').toFloat();
+    Serial.println(receivedMeasurement);
+    UpdateLEDs(receivedMeasurement);
   }
   if (Serial.available()) // If stuff was typed in the serial monitor
   {
