@@ -3,15 +3,16 @@
 
   This sketch interfaces with:
   -A RN42 bluetooth modem
-  -An MQ-2 Gas/Smoke detector via Analog pin 0
+  -A iAQ-Core air quality sensor
 
   The sensor is designed to:
   1) Maintain a bluetooth connection to receiver, keep this connection in SPP data mode
-  2) Periodicaly poll the ADC and report the voltage value over the bluetooth link to the master
+  2) Periodicaly poll the sensor and report the air quality value over the bluetooth link to the master
 
   TODO: I'll worry about battery power optimization later / look at SY command (lowers transmit power) / SW command to enable 'low power sniff mode'
 */
 #include <SoftwareSerial.h>
+#include <Wire.h>
 
 int bluetoothTx = 13;  // TX-O pin of bluetooth mate
 int bluetoothRx = 12;  // RX-I pin of bluetooth mate
@@ -41,6 +42,8 @@ void setup()
   delay(100);
 
   AttemptBluetoothConnect();
+
+  Wire.begin(); // Begin as the I2C master to the air quality slave
 }
 
 void loop()
@@ -86,27 +89,19 @@ void loop()
   // Set the next measurement time in the future. //TODO: Handle rollover
   nextSmokeMeasurementMilliseconds = currentMilliseconds + SMOKE_MEASUREMENT_DELAY_MILLISECONDS;
 
-  float sensorValue = 0;
-  const int ANALOG_SAMPLES = 10.0;
-
-  for (int i = 0; i < ANALOG_SAMPLES; i++)
+  Wire.requestFrom(0x5A, 9); // iAQ address is 0x5A, the data presented is 9 bytes long. ill parse it later
+  while (Wire.available())
   {
-    sensorValue += analogRead(A0);
+    unsigned char c = (unsigned char)Wire.read();
+    Serial.print(c, HEX);
+    Serial.print(" ");
   }
 
-  // Use the raw voltage / ADC value. We dont particularly care about calculating an exact PPM from the sensor
-  float averageSensorValue = sensorValue / ANALOG_SAMPLES;
-  float sensorVoltage = averageSensorValue * 5.0 / 1023.0; // 10 bit Analog precision @ 5 volts;
-
-  Serial.print(sensorVoltage);
-  Serial.print(" ");
-  Serial.print(averageSensorValue);
-  Serial.print(" ");
   Serial.println();
 
   if (isBluetoothConnected)
   {
-    bluetooth.print(sensorVoltage);
+    bluetooth.print(1); // TODO: Make sense of the I2C data from the iAQ-Core sensor
     bluetooth.print(" ");
   }
 }
