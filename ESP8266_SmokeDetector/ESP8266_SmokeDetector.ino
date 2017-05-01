@@ -22,6 +22,15 @@
 #define SSID_MAX_LENGTH 30
 #define WIFI_PASSWORD_MAX_LENGTH 30
 
+#define CONFIG_WIFI_SSID "wifi_ssid"
+#define CONFIG_WIFI_PASSWORD "wifi_password"
+#define CONFIG_DEVICE_NAME "device_name"
+#define CONFIG_SMTP_SERVER "smtp_server"
+#define CONFIG_SMTP_ACCOUNT "smtp_account"
+#define CONFIG_SMTP_PASSWORD "smtp_password"
+#define CONFIG_NOTIFICATION_EMAIL "notification_email"
+#define CONFIG_NOTIFICATION_CO2_PPM "notification_co2_ppm"
+
 // Configuration variables
 char wifiSSID[SSID_MAX_LENGTH];
 char wifiPassword[WIFI_PASSWORD_MAX_LENGTH];
@@ -54,8 +63,6 @@ bool inWarmUpState = false;
 bool inSuccessfulSensorState = false;
 bool inThresholdExceededState = false;
 
-bool notificationSent = false; // TODO: Make email notification better
-
 void setup()
 {
   // Setup I2C pins. NOTE: Clock stretching is REQUIRED for the AMS iAQ module. it uses it extensively
@@ -79,10 +86,6 @@ void setup()
     Serial.print("Using Config File: ");
     Serial.println(DEFAULT_CONFIG_FILE_NAME);
     File configFile = SPIFFS.open(DEFAULT_CONFIG_FILE_NAME, "r");
-    if (!configFile)
-    {
-      Serial.println("But couldnt open it.."); //TODO: error handling
-    }
 
     Serial.println("Using Settings: ");
     while (configFile.available())
@@ -93,8 +96,9 @@ void setup()
   }
   else
   {
-    Serial.print("Couldnt Find Config File: ");
-    Serial.println(DEFAULT_CONFIG_FILE_NAME);
+    Serial.print("Settings file doesnt exist, creating empty file and entering config mode.");
+    File configFile = SPIFFS.open(DEFAULT_CONFIG_FILE_NAME, "w");
+    configFile.close();
     enterConfigState();
     return;
   }
@@ -108,21 +112,21 @@ bool parseSettingLine(String settingLine)
   String settingString = settingLine.substring(indexOfFieldSeparator + 1, settingLine.length() - 1);
   Serial.println(settingString);
 
-  if (settingLine.startsWith("wifi_ssid"))
+  if (settingLine.startsWith(CONFIG_WIFI_SSID))
     settingString.toCharArray(wifiSSID, SSID_MAX_LENGTH);
-  else if (settingLine.startsWith("wifi_password"))
+  else if (settingLine.startsWith(CONFIG_WIFI_PASSWORD))
     settingString.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
-  else if (settingLine.startsWith("device_name"))
+  else if (settingLine.startsWith(CONFIG_DEVICE_NAME))
     deviceName = settingString;
-  else if (settingLine.startsWith("smtp_server"))
+  else if (settingLine.startsWith(CONFIG_SMTP_SERVER))
     smtpServer = settingString;
-  else if (settingLine.startsWith("smtp_account"))
+  else if (settingLine.startsWith(CONFIG_SMTP_ACCOUNT))
     smtpAccount = settingString;
-  else if (settingLine.startsWith("smtp_password"))
+  else if (settingLine.startsWith(CONFIG_SMTP_PASSWORD))
     smtpPassword = settingString;
-  else if (settingLine.startsWith("notification_email"))
+  else if (settingLine.startsWith(CONFIG_NOTIFICATION_EMAIL))
     notificationEmail = settingString;
-  else if (settingLine.startsWith("notification_co2_ppm"))
+  else if (settingLine.startsWith(CONFIG_NOTIFICATION_CO2_PPM))
     notificationCo2PPM = settingString.toInt();
   else
   {
@@ -131,17 +135,33 @@ bool parseSettingLine(String settingLine)
   }
 }
 
+#define EMAIL_NOTIFICATION_TIMESPAN (1 * 60 * 1000) // Only send at most once every 30 mins?
+unsigned long emailTimer = 0;
+
 bool sendNotificationEmail(String body)
 {
+  if ((millis() < emailTimer) || inConfigState)
+    return false;
+
   SendEmail e(smtpServer, 465, smtpAccount, smtpPassword, 5000, true);
-  bool result = e.send("<" + smtpAccount + ">", "<" + notificationEmail + ">", deviceName, body); // Gmail requires <> around to/from addresses
+
+  String adjustedSmtpAccount = smtpAccount;
+  String adjustedNotificationEmail = notificationEmail;
+
+  // Gmail requires <> around to/from addresses
+  if (smtpAccount.endsWith("@gmail.com"))
+    adjustedSmtpAccount = "<" + smtpAccount + ">";
+
+  if (notificationEmail.endsWith("@gmail.com"))
+    adjustedNotificationEmail = "<" + notificationEmail + ">";
+
+  bool result = e.send(adjustedSmtpAccount, adjustedNotificationEmail, deviceName, body);
   Serial.print("Email result " + result);
   Serial.println(result);
 
-  // Send test email
-  //SendEmail e("smtp.gmail.com", 465, "internetofscott@gmail.com", "M1TTEn$1", 5000, true);
-  //bool result = e.send("<internetofscott@gmail.com>", "<scott.brust@gmail.com>", "ESP8266 subject", "Test message");
-  //bool result = e.send("<internetofscott@gmail.com>", "<7074108156@vtext.com>", "ESP8266 subject2", "Test message2");
+  emailTimer = millis() + EMAIL_NOTIFICATION_TIMESPAN;
+
+  return result;
 }
 
 void querySensor()
@@ -174,26 +194,19 @@ void querySensor()
     Serial.print(" TVOC PPB: ");
     Serial.println(tvocPPB);
 
-    // TODO: Better notification logic
     if (co2PPM > notificationCo2PPM)
     {
       inThresholdExceededState = true;
 
-      if (!notificationSent)
-      {
-        String notificationText = "CO2 threshold hit: ";
-        notificationText.concat(co2PPM);
-        notificationText.concat(" TVOC ppm: ");
-        notificationText.concat(tvocPPB);
+      String notificationText = "CO2 threshold hit: ";
+      notificationText.concat(co2PPM);
+      notificationText.concat(" TVOC ppm: ");
+      notificationText.concat(tvocPPB);
 
-        sendNotificationEmail(notificationText);
-        notificationSent = true; // TODO: Only send one email per alarm. aka throttle somehow or whatever
-      }
+      sendNotificationEmail(notificationText);
     }
     else
-    {
       inThresholdExceededState = false;
-    }
   }
   else
   {
@@ -237,13 +250,9 @@ void readButtonState()
 void updateLEDState()
 {
   if (inConfigState)
-  {
     digitalWrite(ledPinRed, LOW);
-  }
   else
-  {
     digitalWrite(ledPinRed, HIGH);
-  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -261,12 +270,9 @@ void loop()
   // If we are in the config state, then run the settings website
   if (inConfigState)
     server.handleClient();
-  else
-  {
-  // TODO: Make sure wifi is still connected  
-  }
+  else if(WiFi.status() == WL_CONNECTION_LOST)
+    enterNormalState();
 
-  // TODO: Dont send email if we are in config state
   // Query sensor every so often
   if (millis() - sensorTimer >= sensorTimerPeriod)
   {
@@ -311,13 +317,7 @@ void enterNormalState()
   Serial.println(WiFi.localIP());
 }
 
-// TODO: expand these handlers to take input
-//  String content = "<html><body><form action='/login' method='POST'>To log in, please use : admin/admin<br>";
-//  content += "User:<input type='text' name='USERNAME' placeholder='user name'><br>";
-//  content += "Password:<input type='password' name='PASSWORD' placeholder='password'><br>";
-//  content += "<input type='submit' name='SUBMIT' value='Submit'></form>" + msg + "<br>";
-//  content += "You also can go <a href='/inline'>here</a></body></html>";
-//  server.send(200, "text/html", content);
+// Display main login page
 void handleRoot() {
   String content = "<html><body><form action='settings' method='POST'>Please enter settings:<br>";
   content += "Wifi: <input type='text' name='wifissid'><br>";
@@ -342,24 +342,61 @@ void handleSettings()
   deviceName = server.arg("devicename");
   smtpServer = server.arg("smtpserver");
   smtpAccount = server.arg("smtpaccount");
-  smtpPassword = server.arg("smptpassword");
+  smtpPassword = server.arg("smtppassword");
   notificationEmail = server.arg("notificationemail");
   notificationCo2PPM = server.arg("notificationco2ppm").toInt();
   ssid.toCharArray(wifiSSID, SSID_MAX_LENGTH);
   password.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
 
-  // Print settings to confirm
-  Serial.println(wifiSSID);
-  Serial.println(wifiPassword);
-  Serial.println(deviceName);
-  Serial.println(smtpServer);
-  Serial.println(smtpAccount);
-  Serial.println(smtpPassword);
-  Serial.println(notificationEmail);
-  Serial.println(notificationCo2PPM);
+  //TODO: Fix this horrible string concatentation hack
+  String settingsString;
+  settingsString += CONFIG_WIFI_SSID;
+  settingsString += "=";
+  settingsString += wifiSSID;
+  settingsString += "\r\n";
 
-  //TODO: write these to file system
+  settingsString += CONFIG_WIFI_PASSWORD;
+  settingsString += "=";
+  settingsString += wifiPassword;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_DEVICE_NAME;
+  settingsString += "=";
+  settingsString += deviceName;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_SMTP_SERVER;
+  settingsString += "=";
+  settingsString += smtpServer;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_SMTP_ACCOUNT;
+  settingsString += "=";
+  settingsString += smtpAccount;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_SMTP_PASSWORD;
+  settingsString += "=";
+  settingsString += smtpPassword;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_NOTIFICATION_EMAIL;
+  settingsString += "=";
+  settingsString += notificationEmail;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_NOTIFICATION_CO2_PPM;
+  settingsString += "=";
+  settingsString += notificationCo2PPM;
+  settingsString += "\r\n";
+
+  Serial.println(settingsString);
+
+  File configFile = SPIFFS.open(DEFAULT_CONFIG_FILE_NAME, "w+");
+  configFile.print(settingsString);
+  configFile.close();
 
   server.send(200, "text/html", "<html><body><h1>Thanks for the settings!</h1><br><a href='/'>Enter Settings Again</a></body></html>");
 }
+
 
