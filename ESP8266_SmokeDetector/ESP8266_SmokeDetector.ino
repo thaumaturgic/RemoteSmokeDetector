@@ -30,6 +30,7 @@
 #define CONFIG_SMTP_PASSWORD "smtp_password"
 #define CONFIG_NOTIFICATION_EMAIL "notification_email"
 #define CONFIG_NOTIFICATION_CO2_PPM "notification_co2_ppm"
+#define CONFIG_NOTIFICATION_FREQUENCY_MINUTES "notification_frequency_minutes"
 
 // Configuration variables
 char wifiSSID[SSID_MAX_LENGTH];
@@ -40,13 +41,14 @@ String smtpAccount;
 String smtpPassword;
 String notificationEmail;
 int notificationCo2PPM;
+int notificationFrequencyMinutes;
 
 // Configuration Button and status LED pins
 int configButtonPin = 4;
 
-int ledPinRed = 13;
+int ledPinRed = 5;
 int ledPinBlue = 12;
-int ledPinGreen = 5;
+int ledPinGreen = 13;
 
 // Config web server
 ESP8266WebServer server(80);
@@ -75,6 +77,11 @@ void setup()
   pinMode(ledPinRed, OUTPUT);
   pinMode(ledPinBlue, OUTPUT);
   pinMode(ledPinGreen, OUTPUT);
+
+  // Turn RGB LED Off
+  analogWrite(ledPinRed, 1023);
+  analogWrite(ledPinBlue, 1023);
+  analogWrite(ledPinGreen, 1023);
 
   // Setup Debug port
   Serial.begin(115200);
@@ -128,6 +135,8 @@ bool parseSettingLine(String settingLine)
     notificationEmail = settingString;
   else if (settingLine.startsWith(CONFIG_NOTIFICATION_CO2_PPM))
     notificationCo2PPM = settingString.toInt();
+  else if (settingLine.startsWith(CONFIG_NOTIFICATION_FREQUENCY_MINUTES))
+    notificationFrequencyMinutes = settingString.toInt();
   else
   {
     Serial.print("Unknown Setting: ");
@@ -135,7 +144,7 @@ bool parseSettingLine(String settingLine)
   }
 }
 
-#define EMAIL_NOTIFICATION_TIMESPAN (1 * 60 * 1000) // Only send at most once every 30 mins?
+#define EMAIL_NOTIFICATION_TIMESPAN (10 * 60 * 1000) // Only send at most once every X mins
 unsigned long emailTimer = 0;
 
 bool sendNotificationEmail(String body)
@@ -197,6 +206,7 @@ void querySensor()
     if (co2PPM > notificationCo2PPM)
     {
       inThresholdExceededState = true;
+      updateLEDState();
 
       String notificationText = "CO2 threshold hit: ";
       notificationText.concat(co2PPM);
@@ -232,6 +242,8 @@ void readButtonState()
     else
       enterConfigState();
 
+
+
     Serial.print("Config mode changed: ");
     Serial.println(inConfigState);
     debounceTimer = millis() + BUTTON_DEBOUNCE_TIME_MS;
@@ -250,9 +262,29 @@ void readButtonState()
 void updateLEDState()
 {
   if (inConfigState)
-    digitalWrite(ledPinRed, LOW);
-  else
-    digitalWrite(ledPinRed, HIGH);
+  {
+    analogWrite(ledPinRed, 1023); // Blue
+    analogWrite(ledPinBlue, 1);
+    analogWrite(ledPinGreen, 1023);
+  }
+  else if (inThresholdExceededState)
+  {
+    analogWrite(ledPinRed, 1); // Red
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1023);
+  }
+  else if (inWarmUpState)
+  {
+    analogWrite(ledPinRed, 1); // Yellow
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1);
+  }
+  else if (inSuccessfulSensorState)
+  {
+    analogWrite(ledPinRed, 1023); // Green
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1);
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -270,7 +302,7 @@ void loop()
   // If we are in the config state, then run the settings website
   if (inConfigState)
     server.handleClient();
-  else if(WiFi.status() == WL_CONNECTION_LOST)
+  else if (WiFi.status() == WL_CONNECTION_LOST)
     enterNormalState();
 
   // Query sensor every so often
@@ -285,6 +317,7 @@ void loop()
 void enterConfigState()
 {
   inConfigState = true;
+  updateLEDState(); // Give feedback immediately
   WiFi.disconnect();
   bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
   if (apStartSuccess)
@@ -303,6 +336,7 @@ void enterConfigState()
 void enterNormalState()
 {
   inConfigState = false;
+  updateLEDState(); // Give feedback immediately
   WiFi.softAPdisconnect(true);
 
   Serial.print("Attempting to connect to wifi with: ");
@@ -328,6 +362,7 @@ void handleRoot() {
   content += "SMTP password: <input type='text' name='smtppassword'><br>";
   content += "Notification Email address: <input type='text' name='notificationemail'><br>";
   content += "Notification CO2 Threshold (PPM): <input type='text' name='notificationco2ppm' value='500'><br>";
+  content += "Notification Frequency in minutes: <input type='text' name='notificationfrequencyminutes' value='10'><br>";
   content += "<input type='submit' value='Submit'></form><br>";
   server.send(200, "text/html", content);
 }
@@ -345,6 +380,7 @@ void handleSettings()
   smtpPassword = server.arg("smtppassword");
   notificationEmail = server.arg("notificationemail");
   notificationCo2PPM = server.arg("notificationco2ppm").toInt();
+  notificationFrequencyMinutes = server.arg("notificationfrequencyminutes").toInt();
   ssid.toCharArray(wifiSSID, SSID_MAX_LENGTH);
   password.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
 
@@ -388,6 +424,11 @@ void handleSettings()
   settingsString += CONFIG_NOTIFICATION_CO2_PPM;
   settingsString += "=";
   settingsString += notificationCo2PPM;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_NOTIFICATION_FREQUENCY_MINUTES;
+  settingsString += "=";
+  settingsString += notificationFrequencyMinutes;
   settingsString += "\r\n";
 
   Serial.println(settingsString);
