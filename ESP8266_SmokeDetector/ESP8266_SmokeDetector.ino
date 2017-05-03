@@ -44,9 +44,9 @@ int notificationCo2PPM;
 int notificationFrequencyMinutes;
 
 // Configuration Button and status LED pins
-int configButtonPin = 4;
+int configButtonPin = 5;
 
-int ledPinRed = 5;
+int ledPinRed = 4;
 int ledPinBlue = 12;
 int ledPinGreen = 13;
 
@@ -64,6 +64,10 @@ bool inConfigState = false;
 bool inWarmUpState = false;
 bool inSuccessfulSensorState = false;
 bool inThresholdExceededState = false;
+bool inWifiConnectedState = false;
+
+int lastCo2Read = 0;
+int lastTvocRead = 0;
 
 void setup()
 {
@@ -203,6 +207,9 @@ void querySensor()
     Serial.print(" TVOC PPB: ");
     Serial.println(tvocPPB);
 
+    lastCo2Read = co2PPM;
+    lastTvocRead = tvocPPB;
+
     if (co2PPM > notificationCo2PPM)
     {
       inThresholdExceededState = true;
@@ -242,8 +249,6 @@ void readButtonState()
     else
       enterConfigState();
 
-
-
     Serial.print("Config mode changed: ");
     Serial.println(inConfigState);
     debounceTimer = millis() + BUTTON_DEBOUNCE_TIME_MS;
@@ -279,7 +284,7 @@ void updateLEDState()
     analogWrite(ledPinBlue, 1023);
     analogWrite(ledPinGreen, 1);
   }
-  else if (inSuccessfulSensorState)
+  else if (inSuccessfulSensorState && inWifiConnectedState)
   {
     analogWrite(ledPinRed, 1023); // Green
     analogWrite(ledPinBlue, 1023);
@@ -319,6 +324,7 @@ void enterConfigState()
   inConfigState = true;
   updateLEDState(); // Give feedback immediately
   WiFi.disconnect();
+  inWifiConnectedState = false;
   bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
   if (apStartSuccess)
   {
@@ -326,6 +332,7 @@ void enterConfigState()
     Serial.println(WiFi.softAPIP());
     server.on("/", handleRoot);
     server.on("/settings", handleSettings);
+    server.on("/reading",handleLastReading);
     server.begin();
   }
   else
@@ -349,21 +356,51 @@ void enterNormalState()
   Serial.println("WiFi connected ");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+  inWifiConnectedState = true;
 }
 
 // Display main login page
 void handleRoot() {
   String content = "<html><body><form action='settings' method='POST'>Please enter settings:<br>";
-  content += "Wifi: <input type='text' name='wifissid'><br>";
-  content += "Wifi Password: <input type='text' name='wifipassword'><br>";
-  content += "Device Name: <input type='text' name='devicename'><br>";
-  content += "SMTP server: <input type='text' name='smtpserver'><br>";
-  content += "SMTP account: <input type='text' name='smtpaccount'><br>";
-  content += "SMTP password: <input type='text' name='smtppassword'><br>";
-  content += "Notification Email address: <input type='text' name='notificationemail'><br>";
-  content += "Notification CO2 Threshold (PPM): <input type='text' name='notificationco2ppm' value='500'><br>";
-  content += "Notification Frequency in minutes: <input type='text' name='notificationfrequencyminutes' value='10'><br>";
+  content += "Wifi: <input type='text' name='wifissid' value ="; 
+  content += wifiSSID;
+  content += "><br>";
+  content += "Wifi Password: <input type='text' name='wifipassword' value =";
+  content += wifiPassword;
+  content += "><br>";
+  content += "Device Name: <input type='text' name='devicename' value =";
+  content += deviceName;
+  content += "><br>";
+  content += "SMTP server: <input type='text' name='smtpserver' value =";
+  content += smtpServer;
+  content += "><br>";
+  content += "SMTP account: <input type='text' name='smtpaccount' value=";
+  content += smtpAccount;
+  content += "><br>";
+  content += "SMTP password: <input type='text' name='smtppassword' value =";
+  content += smtpPassword;
+  content += "><br>";
+  content += "Notification Email address: <input type='text' name='notificationemail' value =";
+  content += notificationEmail;
+  content += "><br>";
+  content += "Notification CO2 Threshold (PPM): <input type='text' name='notificationco2ppm' value=";
+  content += notificationCo2PPM;
+  content += "><br>";
+  content += "Notification Frequency in minutes: <input type='text' name='notificationfrequencyminutes' value=";
+  content += notificationFrequencyMinutes;
+  content += "><br>";
   content += "<input type='submit' value='Submit'></form><br>";
+  server.send(200, "text/html", content);
+}
+
+void handleLastReading()
+{
+  String content = "<html><body>Last Measurements:<br>";
+  content += "CO2 Equivalent (PPM):";
+  content += lastCo2Read;
+  content += "<br>TVOC (PPB): ";
+  content += lastTvocRead;
+  content += "</body></html>";
   server.send(200, "text/html", content);
 }
 
