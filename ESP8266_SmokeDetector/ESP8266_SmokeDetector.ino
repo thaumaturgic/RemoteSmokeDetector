@@ -41,7 +41,7 @@ String smtpAccount;
 String smtpPassword;
 String notificationEmail;
 int notificationCo2PPM;
-int notificationFrequencyMinutes;
+int notificationFrequencyMinutes = 0;
 
 // Configuration Button and status LED pins
 int configButtonPin = 5;
@@ -82,10 +82,10 @@ void setup()
   pinMode(ledPinBlue, OUTPUT);
   pinMode(ledPinGreen, OUTPUT);
 
-  // Turn RGB LED Off
-  analogWrite(ledPinRed, 1023);
-  analogWrite(ledPinBlue, 1023);
-  analogWrite(ledPinGreen, 1023);
+  // Turn RGB LED On
+  analogWrite(ledPinRed, 1);
+  analogWrite(ledPinBlue, 1);
+  analogWrite(ledPinGreen, 1);
 
   // Setup Debug port
   Serial.begin(115200);
@@ -117,6 +117,7 @@ void setup()
   enterNormalState();
 }
 
+// Parse each line of the settings file to load settings into RAM
 bool parseSettingLine(String settingLine)
 {
   int indexOfFieldSeparator = settingLine.indexOf("=");
@@ -148,7 +149,6 @@ bool parseSettingLine(String settingLine)
   }
 }
 
-#define EMAIL_NOTIFICATION_TIMESPAN (10 * 60 * 1000) // Only send at most once every X mins
 unsigned long emailTimer = 0;
 
 bool sendNotificationEmail(String body)
@@ -165,14 +165,14 @@ bool sendNotificationEmail(String body)
   if (smtpAccount.endsWith("@gmail.com"))
     adjustedSmtpAccount = "<" + smtpAccount + ">";
 
-  if (notificationEmail.endsWith("@gmail.com"))
+  //if (notificationEmail.endsWith("@gmail.com"))
     adjustedNotificationEmail = "<" + notificationEmail + ">";
 
   bool result = e.send(adjustedSmtpAccount, adjustedNotificationEmail, deviceName, body);
   Serial.print("Email result " + result);
   Serial.println(result);
 
-  emailTimer = millis() + EMAIL_NOTIFICATION_TIMESPAN;
+  emailTimer = millis() + (notificationFrequencyMinutes * 60 * 1000);
 
   return result;
 }
@@ -259,11 +259,11 @@ void readButtonState()
     debounceTimer = 0;
 }
 
-// TODO: Update LED based on state
+// Update LED based on state
 // Blue if in config mode
 // Red if sensor threshold is exceeded
 // Yellow if sensor is still warming up
-// Green if connected to wifi and sensor is completed warming up
+// Green if connected to wifi and sensor is giving valid reads
 void updateLEDState()
 {
   if (inConfigState)
@@ -332,7 +332,7 @@ void enterConfigState()
     Serial.println(WiFi.softAPIP());
     server.on("/", handleRoot);
     server.on("/settings", handleSettings);
-    server.on("/reading",handleLastReading);
+    server.on("/reading", handleLastReading);
     server.begin();
   }
   else
@@ -349,8 +349,22 @@ void enterNormalState()
   Serial.print("Attempting to connect to wifi with: ");
   Serial.println(wifiSSID);
   WiFi.begin(wifiSSID, wifiPassword);
-  while (WiFi.status() != WL_CONNECTED) {
+  int i = 0;
+  for (i = 0; (i < 10) && (WiFi.status() != WL_CONNECTED); i++)
+  {
     delay(500);
+    if (i % 2)
+    {
+      analogWrite(ledPinRed, 1);
+      analogWrite(ledPinBlue, 1);
+      analogWrite(ledPinGreen, 1);
+    }
+    else
+    {
+      analogWrite(ledPinRed, 1023);
+      analogWrite(ledPinBlue, 1023);
+      analogWrite(ledPinGreen, 1023);      
+    }
     Serial.print(".");
   }
   Serial.println("WiFi connected ");
@@ -359,10 +373,11 @@ void enterNormalState()
   inWifiConnectedState = true;
 }
 
-// Display main login page
+// Display main login page with current settings
+// TODO: better string building...
 void handleRoot() {
   String content = "<html><body><form action='settings' method='POST'>Please enter settings:<br>";
-  content += "Wifi: <input type='text' name='wifissid' value ="; 
+  content += "Wifi: <input type='text' name='wifissid' value =";
   content += wifiSSID;
   content += "><br>";
   content += "Wifi Password: <input type='text' name='wifipassword' value =";
@@ -404,6 +419,7 @@ void handleLastReading()
   server.send(200, "text/html", content);
 }
 
+// TODO: better string handling...
 void handleSettings()
 {
   Serial.println("Got Settings");
