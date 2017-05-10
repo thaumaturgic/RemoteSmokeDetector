@@ -16,12 +16,16 @@
 #include "SendEmail.h"
 #include "FS.h"
 
+/////////////////// Globals and #defines ///////////////////
+
+// File name to look for in file system
 #define DEFAULT_CONFIG_FILE_NAME "/config.ini"
 
 // Arbitrary sizes for char buffers. char[] is required for wifi libaries so its used instead of String
 #define SSID_MAX_LENGTH 30
 #define WIFI_PASSWORD_MAX_LENGTH 30
 
+// Configuration file string definitions
 #define CONFIG_WIFI_SSID "wifi_ssid"
 #define CONFIG_WIFI_PASSWORD "wifi_password"
 #define CONFIG_DEVICE_NAME "device_name"
@@ -43,14 +47,18 @@ String notificationEmail;
 int notificationCo2PPM;
 int notificationFrequencyMinutes = 0;
 
-// Configuration Button and status LED pins
+// Configuration Button pin to enter into configuration mode
 int configButtonPin = 5;
 
+// Status RGB LED pins
 int ledPinRed = 4;
 int ledPinBlue = 12;
 int ledPinGreen = 13;
 
-// Config web server
+// Sensor mosfet pin used to turn sensor on/off when going out/in sleep mode
+int pfetGatePin = 0;
+
+// Configuration web server
 ESP8266WebServer server(80);
 
 // I2C pin and device definitions
@@ -59,15 +67,29 @@ ESP8266WebServer server(80);
 const int SDAPin = 2;
 const int SCLPin = 14;
 
-// State variables
+// System state variables
 bool inConfigState = false;
 bool inWarmUpState = false;
 bool inSuccessfulSensorState = false;
 bool inThresholdExceededState = false;
 bool inWifiConnectedState = false;
 
+// Last measured air quality values
 int lastCo2Read = 0;
 int lastTvocRead = 0;
+
+// Next MS we are allowed to send another notification email
+unsigned long emailTimer = 0;
+
+// We dont want to count multiple config button state transitions as multiple button presses
+int debounceTimer = 0;
+#define BUTTON_DEBOUNCE_PERIOD_MS 500
+
+// How often in MS to poll the air quality sensor
+unsigned long sensorTimer = 0;
+#define SENSOR_TIMER_PERIOD_MS 500
+
+/////////////////// setup() and loop() ///////////////////
 
 void setup()
 {
@@ -81,6 +103,10 @@ void setup()
   pinMode(ledPinRed, OUTPUT);
   pinMode(ledPinBlue, OUTPUT);
   pinMode(ledPinGreen, OUTPUT);
+
+  // Keep the iAQ sensor on by default
+  pinMode(pfetGatePin, OUTPUT);
+  digitalWrite(pfetGatePin, HIGH);
 
   // Turn RGB LED On
   analogWrite(ledPinRed, 1);
@@ -117,39 +143,144 @@ void setup()
   enterNormalState();
 }
 
-// Parse each line of the settings file to load settings into RAM
-bool parseSettingLine(String settingLine)
+void loop()
 {
-  int indexOfFieldSeparator = settingLine.indexOf("=");
-  String settingString = settingLine.substring(indexOfFieldSeparator + 1, settingLine.length() - 1);
-  Serial.println(settingString);
+  // Do simple button debouncing
+  readButtonState();
 
-  if (settingLine.startsWith(CONFIG_WIFI_SSID))
-    settingString.toCharArray(wifiSSID, SSID_MAX_LENGTH);
-  else if (settingLine.startsWith(CONFIG_WIFI_PASSWORD))
-    settingString.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
-  else if (settingLine.startsWith(CONFIG_DEVICE_NAME))
-    deviceName = settingString;
-  else if (settingLine.startsWith(CONFIG_SMTP_SERVER))
-    smtpServer = settingString;
-  else if (settingLine.startsWith(CONFIG_SMTP_ACCOUNT))
-    smtpAccount = settingString;
-  else if (settingLine.startsWith(CONFIG_SMTP_PASSWORD))
-    smtpPassword = settingString;
-  else if (settingLine.startsWith(CONFIG_NOTIFICATION_EMAIL))
-    notificationEmail = settingString;
-  else if (settingLine.startsWith(CONFIG_NOTIFICATION_CO2_PPM))
-    notificationCo2PPM = settingString.toInt();
-  else if (settingLine.startsWith(CONFIG_NOTIFICATION_FREQUENCY_MINUTES))
-    notificationFrequencyMinutes = settingString.toInt();
-  else
+  // Update status LED with system state
+  updateLEDState();
+
+  // If we are in the config state, then run the settings website
+  if (inConfigState)
+    server.handleClient();
+  else if (WiFi.status() == WL_CONNECTION_LOST)
+    enterNormalState();
+
+  // Query sensor every so often
+  if (millis() - sensorTimer >= SENSOR_TIMER_PERIOD_MS)
   {
-    Serial.print("Unknown Setting: ");
-    Serial.println(settingLine);
+    sensorTimer = millis();
+    querySensor();
+  }
+
+  // TODO: Check if we should sleep
+}
+
+/////////////////// State functions ///////////////////
+
+// Disconnect from wifi, start configuration webserver
+void enterConfigState()
+{
+  inConfigState = true;
+  updateLEDState(); // Give feedback immediately
+  WiFi.disconnect();
+  inWifiConnectedState = false;
+  bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
+  if (apStartSuccess)
+  {
+    Serial.print("Webserver start success: ");
+    Serial.println(WiFi.softAPIP());
+    server.on("/", handleRoot);
+    server.on("/settings", handleSettings);
+    server.on("/reading", handleLastReading);
+    server.begin();
+  }
+  else
+    Serial.println("Webserver start failure.");
+}
+
+// Shut down webserver, connect to SSID from settings
+void enterNormalState()
+{
+  inConfigState = false;
+  updateLEDState(); // Give feedback immediately
+  WiFi.softAPdisconnect(true);
+
+  Serial.print("Attempting to connect to wifi with: ");
+  Serial.println(wifiSSID);
+  WiFi.begin(wifiSSID, wifiPassword);
+  // Attempt to connect to the wifi for a limited time. Blink the LED to give feedback.
+  // If we fail, we can at least re-enter config mode and change the SSID/Password and try again
+  int i = 0;
+  for (i = 0; (i < 10) && (WiFi.status() != WL_CONNECTED); i++)
+  {
+    delay(500);
+    if (i % 2)
+    {
+      analogWrite(ledPinRed, 1);
+      analogWrite(ledPinBlue, 1);
+      analogWrite(ledPinGreen, 1);
+    }
+    else
+    {
+      analogWrite(ledPinRed, 1023);
+      analogWrite(ledPinBlue, 1023);
+      analogWrite(ledPinGreen, 1023);
+    }
+    Serial.print(".");
+  }
+  Serial.println("WiFi connected ");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  inWifiConnectedState = true;
+}
+
+// Update LED based on state
+// Blue if in config mode
+// Red if sensor threshold is exceeded
+// Yellow if sensor is still warming up
+// Green if connected to wifi and sensor is giving valid reads
+void updateLEDState()
+{
+  if (inConfigState) // Blue
+  {
+    analogWrite(ledPinRed, 1023); 
+    analogWrite(ledPinBlue, 1);
+    analogWrite(ledPinGreen, 1023);
+  }
+  else if (inThresholdExceededState) // Red
+  {
+    analogWrite(ledPinRed, 1); 
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1023);
+  }
+  else if (inWarmUpState) // Yellow
+  {
+    analogWrite(ledPinRed, 1); 
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1);
+  }
+  else if (inSuccessfulSensorState && inWifiConnectedState) // Green
+  {
+    analogWrite(ledPinRed, 1023); 
+    analogWrite(ledPinBlue, 1023);
+    analogWrite(ledPinGreen, 1);
   }
 }
 
-unsigned long emailTimer = 0;
+void readButtonState()
+{
+  // ESP8266 is active low
+  if (debounceTimer == 0 && digitalRead(configButtonPin) == LOW)
+  {
+    // Button has been pressed, change to the opposite state
+    if (inConfigState)
+      enterNormalState();
+    else
+      enterConfigState();
+
+    Serial.print("Config mode changed: ");
+    Serial.println(inConfigState);
+
+    debounceTimer = millis() + BUTTON_DEBOUNCE_PERIOD_MS;
+  }
+
+  // Has the debounce counter expired? If so, then reset it and allow another button press
+  if (millis() > debounceTimer)
+    debounceTimer = 0;
+}
+/////////////////// Helper functions ///////////////////
 
 bool sendNotificationEmail(String body)
 {
@@ -165,8 +296,7 @@ bool sendNotificationEmail(String body)
   if (smtpAccount.endsWith("@gmail.com"))
     adjustedSmtpAccount = "<" + smtpAccount + ">";
 
-  //if (notificationEmail.endsWith("@gmail.com"))
-    adjustedNotificationEmail = "<" + notificationEmail + ">";
+  adjustedNotificationEmail = "<" + notificationEmail + ">";
 
   bool result = e.send(adjustedSmtpAccount, adjustedNotificationEmail, deviceName, body);
   Serial.print("Email result " + result);
@@ -177,6 +307,7 @@ bool sendNotificationEmail(String body)
   return result;
 }
 
+// Get Air Quality data from the iAQ sensor
 void querySensor()
 {
   // See datasheet for details on data format, etc
@@ -233,264 +364,95 @@ void querySensor()
     Serial.println(statusByte, HEX);
   }
 }
+//////////TIME STUFF
 
-// We dont want to count multiple config button state transitions as multiple button presses
-int debounceTimer = 0;
-#define BUTTON_DEBOUNCE_TIME_MS 1000
+unsigned int localPort = 2390;
+IPAddress timeServerIP; // time.nist.gov NTP server address
+const char* ntpServerName = "time.nist.gov";
+const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
+byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
+WiFiUDP udp;
 
-void readButtonState()
+unsigned long sendNTPpacket(IPAddress& address)
 {
-  // ESP8266 is active low
-  if (debounceTimer == 0 && digitalRead(configButtonPin) == LOW)
-  {
-    // Button has been pressed, change states
-    if (inConfigState)
-      enterNormalState();
-    else
-      enterConfigState();
+  Serial.println("sending NTP packet...");
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
 
-    Serial.print("Config mode changed: ");
-    Serial.println(inConfigState);
-    debounceTimer = millis() + BUTTON_DEBOUNCE_TIME_MS;
-  }
-
-  // Has the counter expired? If so, then reset it
-  if (millis() > debounceTimer)
-    debounceTimer = 0;
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  udp.beginPacket(address, 123); //NTP requests are to port 123
+  udp.write(packetBuffer, NTP_PACKET_SIZE);
+  udp.endPacket();
 }
 
-// Update LED based on state
-// Blue if in config mode
-// Red if sensor threshold is exceeded
-// Yellow if sensor is still warming up
-// Green if connected to wifi and sensor is giving valid reads
-void updateLEDState()
+void getNetworkTime()
 {
-  if (inConfigState)
-  {
-    analogWrite(ledPinRed, 1023); // Blue
-    analogWrite(ledPinBlue, 1);
-    analogWrite(ledPinGreen, 1023);
+  Serial.println("Starting UDP");
+  udp.begin(localPort);
+  Serial.print("Local port: ");
+  Serial.println(udp.localPort());
+
+  WiFi.hostByName(ntpServerName, timeServerIP);
+  sendNTPpacket(timeServerIP); // send an NTP packet to a time server
+  delay(1000);
+  int cb = udp.parsePacket();
+
+  if (!cb) {
+    Serial.println("no packet yet");
   }
-  else if (inThresholdExceededState)
-  {
-    analogWrite(ledPinRed, 1); // Red
-    analogWrite(ledPinBlue, 1023);
-    analogWrite(ledPinGreen, 1023);
-  }
-  else if (inWarmUpState)
-  {
-    analogWrite(ledPinRed, 1); // Yellow
-    analogWrite(ledPinBlue, 1023);
-    analogWrite(ledPinGreen, 1);
-  }
-  else if (inSuccessfulSensorState && inWifiConnectedState)
-  {
-    analogWrite(ledPinRed, 1023); // Green
-    analogWrite(ledPinBlue, 1023);
-    analogWrite(ledPinGreen, 1);
-  }
-}
+  else {
+    Serial.print("packet received, length=");
+    Serial.println(cb);
+    // We've received a packet, read the data from it
+    udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-unsigned long sensorTimer = 0;
-int sensorTimerPeriod = 500; // How often in MS to poll the air quality sensor
+    //the timestamp starts at byte 40 of the received packet and is four bytes,
+    // or two words, long. First, esxtract the two words:
 
-void loop()
-{
-  // Do simple button debouncing
-  readButtonState();
+    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+    // combine the four bytes (two words) into a long integer
+    // this is NTP time (seconds since Jan 1 1900):
+    unsigned long secsSince1900 = highWord << 16 | lowWord;
+    Serial.print("Seconds since Jan 1 1900 = " );
+    Serial.println(secsSince1900);
 
-  // Update status LED with system state
-  updateLEDState();
+    // now convert NTP time into everyday time:
+    Serial.print("Unix time = ");
+    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+    const unsigned long seventyYears = 2208988800UL;
+    // subtract seventy years:
+    unsigned long epoch = secsSince1900 - seventyYears;
+    // print Unix time:
+    Serial.println(epoch);
 
-  // If we are in the config state, then run the settings website
-  if (inConfigState)
-    server.handleClient();
-  else if (WiFi.status() == WL_CONNECTION_LOST)
-    enterNormalState();
-
-  // Query sensor every so often
-  if (millis() - sensorTimer >= sensorTimerPeriod)
-  {
-    sensorTimer = millis();
-    querySensor();
-  }
-}
-
-// Disconnect from wifi, start configuration webserver
-void enterConfigState()
-{
-  inConfigState = true;
-  updateLEDState(); // Give feedback immediately
-  WiFi.disconnect();
-  inWifiConnectedState = false;
-  bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
-  if (apStartSuccess)
-  {
-    Serial.print("Webserver start success: ");
-    Serial.println(WiFi.softAPIP());
-    server.on("/", handleRoot);
-    server.on("/settings", handleSettings);
-    server.on("/reading", handleLastReading);
-    server.begin();
-  }
-  else
-    Serial.println("Webserver start failure.");
-}
-
-// Shut down webserver, connect to SSID from settings
-void enterNormalState()
-{
-  inConfigState = false;
-  updateLEDState(); // Give feedback immediately
-  WiFi.softAPdisconnect(true);
-
-  Serial.print("Attempting to connect to wifi with: ");
-  Serial.println(wifiSSID);
-  WiFi.begin(wifiSSID, wifiPassword);
-  int i = 0;
-  for (i = 0; (i < 10) && (WiFi.status() != WL_CONNECTED); i++)
-  {
-    delay(500);
-    if (i % 2)
-    {
-      analogWrite(ledPinRed, 1);
-      analogWrite(ledPinBlue, 1);
-      analogWrite(ledPinGreen, 1);
+    // print the hour, minute and second:
+    Serial.print("The UTC time is ");       // UTC is the time at Greenwich Meridian (GMT)
+    Serial.print((epoch  % 86400L) / 3600); // print the hour (86400 equals secs per day)
+    Serial.print(':');
+    if ( ((epoch % 3600) / 60) < 10 ) {
+      // In the first 10 minutes of each hour, we'll want a leading '0'
+      Serial.print('0');
     }
-    else
-    {
-      analogWrite(ledPinRed, 1023);
-      analogWrite(ledPinBlue, 1023);
-      analogWrite(ledPinGreen, 1023);      
+    Serial.print((epoch  % 3600) / 60); // print the minute (3600 equals secs per minute)
+    Serial.print(':');
+    if ( (epoch % 60) < 10 ) {
+      // In the first 10 seconds of each minute, we'll want a leading '0'
+      Serial.print('0');
     }
-    Serial.print(".");
+    Serial.println(epoch % 60); // print the second
   }
-  Serial.println("WiFi connected ");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-  inWifiConnectedState = true;
 }
-
-// Display main login page with current settings
-// TODO: better string building...
-void handleRoot() {
-  String content = "<html><body><form action='settings' method='POST'>Please enter settings:<br>";
-  content += "Wifi: <input type='text' name='wifissid' value =";
-  content += wifiSSID;
-  content += "><br>";
-  content += "Wifi Password: <input type='text' name='wifipassword' value =";
-  content += wifiPassword;
-  content += "><br>";
-  content += "Device Name: <input type='text' name='devicename' value =";
-  content += deviceName;
-  content += "><br>";
-  content += "SMTP server: <input type='text' name='smtpserver' value =";
-  content += smtpServer;
-  content += "><br>";
-  content += "SMTP account: <input type='text' name='smtpaccount' value=";
-  content += smtpAccount;
-  content += "><br>";
-  content += "SMTP password: <input type='text' name='smtppassword' value =";
-  content += smtpPassword;
-  content += "><br>";
-  content += "Notification Email address: <input type='text' name='notificationemail' value =";
-  content += notificationEmail;
-  content += "><br>";
-  content += "Notification CO2 Threshold (PPM): <input type='text' name='notificationco2ppm' value=";
-  content += notificationCo2PPM;
-  content += "><br>";
-  content += "Notification Frequency in minutes: <input type='text' name='notificationfrequencyminutes' value=";
-  content += notificationFrequencyMinutes;
-  content += "><br>";
-  content += "<input type='submit' value='Submit'></form><br>";
-  server.send(200, "text/html", content);
-}
-
-void handleLastReading()
-{
-  String content = "<html><body>Last Measurements:<br>";
-  content += "CO2 Equivalent (PPM):";
-  content += lastCo2Read;
-  content += "<br>TVOC (PPB): ";
-  content += lastTvocRead;
-  content += "</body></html>";
-  server.send(200, "text/html", content);
-}
-
-// TODO: better string handling...
-void handleSettings()
-{
-  Serial.println("Got Settings");
-  String ssid = server.arg("wifissid");
-  String password = server.arg("wifipassword");
-
-  // Parse settings
-  deviceName = server.arg("devicename");
-  smtpServer = server.arg("smtpserver");
-  smtpAccount = server.arg("smtpaccount");
-  smtpPassword = server.arg("smtppassword");
-  notificationEmail = server.arg("notificationemail");
-  notificationCo2PPM = server.arg("notificationco2ppm").toInt();
-  notificationFrequencyMinutes = server.arg("notificationfrequencyminutes").toInt();
-  ssid.toCharArray(wifiSSID, SSID_MAX_LENGTH);
-  password.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
-
-  //TODO: Fix this horrible string concatentation hack
-  String settingsString;
-  settingsString += CONFIG_WIFI_SSID;
-  settingsString += "=";
-  settingsString += wifiSSID;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_WIFI_PASSWORD;
-  settingsString += "=";
-  settingsString += wifiPassword;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_DEVICE_NAME;
-  settingsString += "=";
-  settingsString += deviceName;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_SMTP_SERVER;
-  settingsString += "=";
-  settingsString += smtpServer;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_SMTP_ACCOUNT;
-  settingsString += "=";
-  settingsString += smtpAccount;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_SMTP_PASSWORD;
-  settingsString += "=";
-  settingsString += smtpPassword;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_NOTIFICATION_EMAIL;
-  settingsString += "=";
-  settingsString += notificationEmail;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_NOTIFICATION_CO2_PPM;
-  settingsString += "=";
-  settingsString += notificationCo2PPM;
-  settingsString += "\r\n";
-
-  settingsString += CONFIG_NOTIFICATION_FREQUENCY_MINUTES;
-  settingsString += "=";
-  settingsString += notificationFrequencyMinutes;
-  settingsString += "\r\n";
-
-  Serial.println(settingsString);
-
-  File configFile = SPIFFS.open(DEFAULT_CONFIG_FILE_NAME, "w+");
-  configFile.print(settingsString);
-  configFile.close();
-
-  server.send(200, "text/html", "<html><body><h1>Thanks for the settings!</h1><br><a href='/'>Enter Settings Again</a></body></html>");
-}
-
 
