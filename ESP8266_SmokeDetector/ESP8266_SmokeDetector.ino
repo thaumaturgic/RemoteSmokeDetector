@@ -35,6 +35,8 @@
 #define CONFIG_NOTIFICATION_EMAIL "notification_email"
 #define CONFIG_NOTIFICATION_CO2_PPM "notification_co2_ppm"
 #define CONFIG_NOTIFICATION_FREQUENCY_MINUTES "notification_frequency_minutes"
+#define CONFIG_START_HOUR "start_hour"
+#define CONFIG_STOP_HOUR "stop_hour"
 
 // Configuration variables
 char wifiSSID[SSID_MAX_LENGTH];
@@ -46,9 +48,11 @@ String smtpPassword;
 String notificationEmail;
 int notificationCo2PPM;
 int notificationFrequencyMinutes = 0;
+int startHour;
+int stopHour;
 
 // Configuration Button pin to enter into configuration mode
-int configButtonPin = 5;
+int configButtonPin = 0;
 
 // Status RGB LED pins
 int ledPinRed = 4;
@@ -56,7 +60,7 @@ int ledPinBlue = 12;
 int ledPinGreen = 13;
 
 // Sensor mosfet pin used to turn sensor on/off when going out/in sleep mode
-int pfetGatePin = 0;
+int pfetGatePin = 5;
 
 // Configuration web server
 ESP8266WebServer server(80);
@@ -82,12 +86,17 @@ int lastTvocRead = 0;
 unsigned long emailTimer = 0;
 
 // We dont want to count multiple config button state transitions as multiple button presses
-int debounceTimer = 0;
+unsigned long debounceTimer = 0;
 #define BUTTON_DEBOUNCE_PERIOD_MS 500
 
 // How often in MS to poll the air quality sensor
 unsigned long sensorTimer = 0;
 #define SENSOR_TIMER_PERIOD_MS 500
+
+int currentGMTHour = 0;
+int currentGMTMinute = 0;
+
+unsigned long millisUntilSleep;
 
 /////////////////// setup() and loop() ///////////////////
 
@@ -106,7 +115,7 @@ void setup()
 
   // Keep the iAQ sensor on by default
   pinMode(pfetGatePin, OUTPUT);
-  digitalWrite(pfetGatePin, HIGH);
+  powerOnSensor();
 
   // Turn RGB LED On
   analogWrite(ledPinRed, 1);
@@ -140,7 +149,41 @@ void setup()
     return;
   }
 
+  // This will connect to wifi and allow us to query a timestamp
   enterNormalState();
+
+  // Get current time, determine if we should be sleeping or not
+  int i = 0;
+  while (!getNetworkTime() && i < 10)
+  {
+    i++;
+  }
+
+  // TODO: Handle 24 hour operating mode
+
+  // If we are supposed to be running, find out when we should sleep
+  if (inOperatingTimespan(currentGMTHour))
+  {
+    int minutesLeftToRun = minutesUntilEndOfOperatingTimespan(currentGMTHour, currentGMTMinute);
+    Serial.print("In operating window for minutes: ");
+    Serial.println(minutesLeftToRun);
+
+    millisUntilSleep = minutesLeftToRun * 60 * 1000; // TODO: overflow?
+  }
+  // If we are supposed to be sleeping, find out when we should wake
+  else
+  {
+    int minutesLeftToSleep = minutesUntilStartOfOperatingTimespan(currentGMTHour, currentGMTMinute);
+    Serial.print("Out of operating window. Sleeping for minutes: ");
+    Serial.println(minutesLeftToSleep);
+
+    // Sleep for 1 hour max. I dont think the ESP8266 is that accurate when sleeping that long
+    if (minutesLeftToSleep > 60)
+      minutesLeftToSleep = 60;
+
+    powerOffSensor();
+    ESP.deepSleep(minutesLeftToSleep * 60 * 1000000);
+  }
 }
 
 void loop()
@@ -164,31 +207,27 @@ void loop()
     querySensor();
   }
 
-  // TODO: Check if we should sleep
+  // Check if we should sleep
+  if (millis() >= millisUntilSleep)
+  {
+    // Update timestamp
+    int i = 0;
+    while (!getNetworkTime() && i < 10)
+    {
+      i++;
+    }
+    int minutesToSleep = minutesUntilStartOfOperatingTimespan(currentGMTHour, currentGMTMinute);
+    if (minutesToSleep > 60)
+      minutesToSleep = 60;
+
+    Serial.print("Time to sleep: ");
+    Serial.println(minutesToSleep);
+    powerOffSensor();
+    ESP.deepSleep(minutesToSleep * 60 * 1000000);
+  }
 }
 
 /////////////////// State functions ///////////////////
-
-// Disconnect from wifi, start configuration webserver
-void enterConfigState()
-{
-  inConfigState = true;
-  updateLEDState(); // Give feedback immediately
-  WiFi.disconnect();
-  inWifiConnectedState = false;
-  bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
-  if (apStartSuccess)
-  {
-    Serial.print("Webserver start success: ");
-    Serial.println(WiFi.softAPIP());
-    server.on("/", handleRoot);
-    server.on("/settings", handleSettings);
-    server.on("/reading", handleLastReading);
-    server.begin();
-  }
-  else
-    Serial.println("Webserver start failure.");
-}
 
 // Shut down webserver, connect to SSID from settings
 void enterNormalState()
@@ -203,7 +242,7 @@ void enterNormalState()
   // Attempt to connect to the wifi for a limited time. Blink the LED to give feedback.
   // If we fail, we can at least re-enter config mode and change the SSID/Password and try again
   int i = 0;
-  for (i = 0; (i < 10) && (WiFi.status() != WL_CONNECTED); i++)
+  for (i = 0; (i < 40) && (WiFi.status() != WL_CONNECTED); i++)
   {
     delay(500);
     if (i % 2)
@@ -226,6 +265,27 @@ void enterNormalState()
   inWifiConnectedState = true;
 }
 
+// Disconnect from wifi, start configuration webserver
+void enterConfigState()
+{
+  inConfigState = true;
+  updateLEDState(); // Give feedback immediately
+  WiFi.disconnect();
+  inWifiConnectedState = false;
+  bool apStartSuccess = WiFi.softAP("ScottsESP", "anniepassword");
+  if (apStartSuccess)
+  {
+    Serial.print("Webserver start success: ");
+    Serial.println(WiFi.softAPIP());
+    server.on("/", handleRoot);
+    server.on("/settings", handleSettings);
+    server.on("/reading", handleLastReading);
+    server.begin();
+  }
+  else
+    Serial.println("Webserver start failure.");
+}
+
 // Update LED based on state
 // Blue if in config mode
 // Red if sensor threshold is exceeded
@@ -235,25 +295,25 @@ void updateLEDState()
 {
   if (inConfigState) // Blue
   {
-    analogWrite(ledPinRed, 1023); 
+    analogWrite(ledPinRed, 1023);
     analogWrite(ledPinBlue, 1);
     analogWrite(ledPinGreen, 1023);
   }
   else if (inThresholdExceededState) // Red
   {
-    analogWrite(ledPinRed, 1); 
+    analogWrite(ledPinRed, 1);
     analogWrite(ledPinBlue, 1023);
     analogWrite(ledPinGreen, 1023);
   }
   else if (inWarmUpState) // Yellow
   {
-    analogWrite(ledPinRed, 1); 
+    analogWrite(ledPinRed, 1);
     analogWrite(ledPinBlue, 1023);
     analogWrite(ledPinGreen, 1);
   }
   else if (inSuccessfulSensorState && inWifiConnectedState) // Green
   {
-    analogWrite(ledPinRed, 1023); 
+    analogWrite(ledPinRed, 1023);
     analogWrite(ledPinBlue, 1023);
     analogWrite(ledPinGreen, 1);
   }
@@ -294,9 +354,10 @@ bool sendNotificationEmail(String body)
 
   // Gmail requires <> around to/from addresses
   if (smtpAccount.endsWith("@gmail.com"))
+  {
     adjustedSmtpAccount = "<" + smtpAccount + ">";
-
-  adjustedNotificationEmail = "<" + notificationEmail + ">";
+    adjustedNotificationEmail = "<" + notificationEmail + ">";
+  }
 
   bool result = e.send(adjustedSmtpAccount, adjustedNotificationEmail, deviceName, body);
   Serial.print("Email result " + result);
@@ -364,95 +425,13 @@ void querySensor()
     Serial.println(statusByte, HEX);
   }
 }
-//////////TIME STUFF
 
-unsigned int localPort = 2390;
-IPAddress timeServerIP; // time.nist.gov NTP server address
-const char* ntpServerName = "time.nist.gov";
-const int NTP_PACKET_SIZE = 48; // NTP time stamp is in the first 48 bytes of the message
-byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing packets
-WiFiUDP udp;
-
-unsigned long sendNTPpacket(IPAddress& address)
+void powerOnSensor(void)
 {
-  Serial.println("sending NTP packet...");
-  // set all bytes in the buffer to 0
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  // Initialize values needed to form NTP request
-  // (see URL above for details on the packets)
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  // 8 bytes of zero for Root Delay & Root Dispersion
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-
-  // all NTP fields have been given values, now
-  // you can send a packet requesting a timestamp:
-  udp.beginPacket(address, 123); //NTP requests are to port 123
-  udp.write(packetBuffer, NTP_PACKET_SIZE);
-  udp.endPacket();
+  digitalWrite(pfetGatePin, HIGH);
 }
 
-void getNetworkTime()
+void powerOffSensor(void)
 {
-  Serial.println("Starting UDP");
-  udp.begin(localPort);
-  Serial.print("Local port: ");
-  Serial.println(udp.localPort());
-
-  WiFi.hostByName(ntpServerName, timeServerIP);
-  sendNTPpacket(timeServerIP); // send an NTP packet to a time server
-  delay(1000);
-  int cb = udp.parsePacket();
-
-  if (!cb) {
-    Serial.println("no packet yet");
-  }
-  else {
-    Serial.print("packet received, length=");
-    Serial.println(cb);
-    // We've received a packet, read the data from it
-    udp.read(packetBuffer, NTP_PACKET_SIZE); // read the packet into the buffer
-
-    //the timestamp starts at byte 40 of the received packet and is four bytes,
-    // or two words, long. First, esxtract the two words:
-
-    unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
-    unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
-    // combine the four bytes (two words) into a long integer
-    // this is NTP time (seconds since Jan 1 1900):
-    unsigned long secsSince1900 = highWord << 16 | lowWord;
-    Serial.print("Seconds since Jan 1 1900 = " );
-    Serial.println(secsSince1900);
-
-    // now convert NTP time into everyday time:
-    Serial.print("Unix time = ");
-    // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
-    const unsigned long seventyYears = 2208988800UL;
-    // subtract seventy years:
-    unsigned long epoch = secsSince1900 - seventyYears;
-    // print Unix time:
-    Serial.println(epoch);
-
-    // print the hour, minute and second:
-    Serial.print("The UTC time is ");       // UTC is the time at Greenwich Meridian (GMT)
-    Serial.print((epoch  % 86400L) / 3600); // print the hour (86400 equals secs per day)
-    Serial.print(':');
-    if ( ((epoch % 3600) / 60) < 10 ) {
-      // In the first 10 minutes of each hour, we'll want a leading '0'
-      Serial.print('0');
-    }
-    Serial.print((epoch  % 3600) / 60); // print the minute (3600 equals secs per minute)
-    Serial.print(':');
-    if ( (epoch % 60) < 10 ) {
-      // In the first 10 seconds of each minute, we'll want a leading '0'
-      Serial.print('0');
-    }
-    Serial.println(epoch % 60); // print the second
-  }
+  digitalWrite(pfetGatePin, LOW);
 }
-
