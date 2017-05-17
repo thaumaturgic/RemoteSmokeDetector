@@ -25,6 +25,10 @@ bool parseSettingLine(String settingLine)
     notificationCo2PPM = settingString.toInt();
   else if (settingLine.startsWith(CONFIG_NOTIFICATION_FREQUENCY_MINUTES))
     notificationFrequencyMinutes = settingString.toInt();
+  else if (settingLine.startsWith(CONFIG_START_HOUR))
+    startHour = settingString.toInt();
+  else if (settingLine.startsWith(CONFIG_STOP_HOUR))
+    stopHour = settingString.toInt();
   else
   {
     Serial.print("Unknown Setting: ");
@@ -65,6 +69,12 @@ void handleRoot() {
   content += "Notification Frequency in minutes: <input type='text' name='notificationfrequencyminutes' value=";
   content += notificationFrequencyMinutes;
   content += "><br>";
+  content += "Hour of day to start running (24h): <input type='text' name='starthour' value=";
+  content += startHour;
+  content += "><br>";
+  content += "Hour of day to stop running (24h): <input type='text' name='stophour' value=";
+  content += stopHour;
+  content += "><br>";
   content += "<input type='submit' value='Submit'></form><br>";
   server.send(200, "text/html", content);
 }
@@ -97,6 +107,8 @@ void handleSettings()
   notificationFrequencyMinutes = server.arg("notificationfrequencyminutes").toInt();
   ssid.toCharArray(wifiSSID, SSID_MAX_LENGTH);
   password.toCharArray(wifiPassword, WIFI_PASSWORD_MAX_LENGTH);
+  startHour = server.arg("starthour").toInt();
+  stopHour = server.arg("stophour").toInt();
 
   //TODO: Fix this horrible string concatentation hack
   String settingsString;
@@ -143,6 +155,16 @@ void handleSettings()
   settingsString += CONFIG_NOTIFICATION_FREQUENCY_MINUTES;
   settingsString += "=";
   settingsString += notificationFrequencyMinutes;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_START_HOUR;
+  settingsString += "=";
+  settingsString += startHour;
+  settingsString += "\r\n";
+
+  settingsString += CONFIG_STOP_HOUR;
+  settingsString += "=";
+  settingsString += stopHour;
   settingsString += "\r\n";
 
   Serial.println(settingsString);
